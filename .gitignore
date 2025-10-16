@@ -2,4 +2,6 @@ scratch/
 .DS_Store
 .idea/
 .ipynb_checkpoints/
-
+db.env/
+*.pt
+__pycache__/

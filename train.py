@@ -11,8 +11,8 @@ from stark_qa import load_qa
 from torch import Tensor
 from torch.nn.utils import clip_grad_norm_
 from torch_geometric import seed_everything
-from torch_geometric.nn import GAT, GRetriever
-from torch_geometric.nn.nlp import LLM
+from torch_geometric.nn.models import GAT
+from torch_geometric.llm import GRetriever,LLM
 from tqdm import tqdm
 
 from compute_metrics import compute_metrics
@@ -120,11 +120,14 @@ def train(
         os.makedirs(f'{root_path}/models', exist_ok=True)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                              drop_last=True, pin_memory=True, shuffle=True)
+                              drop_last=True, pin_memory=True, shuffle=True,
+                              generator=torch.Generator(device=torch.get_default_device().type))
     val_loader = DataLoader(val_dataset, batch_size=eval_batch_size,
-                            drop_last=False, pin_memory=True, shuffle=False)
+                            drop_last=False, pin_memory=True, shuffle=False, 
+                            generator=torch.Generator(device=torch.get_default_device().type))
     test_loader = DataLoader(test_dataset, batch_size=eval_batch_size,
-                             drop_last=False, pin_memory=True, shuffle=False)
+                             drop_last=False, pin_memory=True, shuffle=False, 
+                             generator=torch.Generator(device=torch.get_default_device().type))
 
     gnn = GAT(
         in_channels=1536,
@@ -134,9 +137,12 @@ def train(
         heads=4,
     )
 
+    gnn = gnn.to(torch.get_default_device().type)
+
     if llama_version == 'tiny_llama':
         llm = LLM(
             model_name='TinyLlama/TinyLlama-1.1B-Chat-v0.1',
+            num_params=1.1,
         )
     elif llama_version == 'llama2-7b':
         llm = LLM(
@@ -145,8 +151,34 @@ def train(
     elif llama_version == 'llama3.1-8b':
         llm = LLM(
             model_name='meta-llama/Llama-3.1-8B-Instruct',
+            num_params=8.0,
         )
-
+    elif llama_version == 'llama3.2-1b':
+        llm = LLM(
+            model_name='meta-llama/Llama-3.2-1B-Instruct',
+            num_params=1.0,
+        )
+    elif llama_version == 'llama3.2-1b-int4':
+        llm = LLM(
+            model_name='meta-llama/Llama-3.2-3B-Instruct-QLORA_INT4_EO8',
+            num_params=1.0,
+        )
+    elif llama_version == 'llama3.2-3b':
+        llm = LLM(
+            model_name='meta-llama/Llama-3.2-3B-Instruct',
+            num_params=1.0,
+        )
+    elif llama_version == 'llama3.2-3b-int4':
+        llm = LLM(
+            model_name='meta-llama/Llama-3.2-3B-Instruct-QLORA_INT4_EO8',
+            num_params=1.0,
+        )
+    
+    llm.device = torch.get_default_device()
+    llm = llm.to(torch.get_default_device().type)
+    llm.llm = llm.llm.to(torch.get_default_device().type)
+    llm.word_embedding = llm.llm.model.get_input_embeddings()
+    print(llm.word_embedding(torch.tensor(1)))
 
     if args.freeze_llm:
         for param in llm.parameters():
@@ -185,6 +217,7 @@ def train(
         loader = tqdm(train_loader, desc=epoch_str)
 
         for step, batch in enumerate(loader):
+            batch = batch.to(torch.get_default_device().type)
             optimizer.zero_grad()
             loss = get_loss(model, batch, model_save_name)
             loss.backward()
@@ -208,6 +241,7 @@ def train(
         model.eval()
         with torch.no_grad():
             for step, batch in enumerate(val_loader):
+                batch = batch.to(torch.get_default_device().type)
                 loss = get_loss(model, batch, model_save_name)
                 val_loss += loss.item()
             val_loss = val_loss / len(val_loader)
@@ -218,9 +252,9 @@ def train(
             best_epoch = epoch
             save_params_dict(model, f'{root_path}/models/{retrieval_config_version}_{algo_config_version}_{g_retriever_config_version}_{model_save_name}_best_val_loss_ckpt.pt')
 
-    if llm.device.type != "cpu":
-        torch.cuda.empty_cache()
-        torch.cuda.reset_max_memory_allocated()
+    #if llm.device.type == "cuda":
+    #    torch.cuda.empty_cache()
+    #    torch.cuda.reset_max_memory_allocated()
 
     if checkpointing and best_epoch != num_epochs - 1:
         print("Loading best checkpoint...")
@@ -234,6 +268,7 @@ def train(
     print("Final evaluation...")
     progress_bar_test = tqdm(range(len(test_loader)))
     for step, batch in enumerate(test_loader):
+        batch = batch.to(torch.get_default_device().type)
         with torch.no_grad():
             pred_time = time.time()
             pred = inference_step(model, batch, model_save_name)
@@ -254,6 +289,8 @@ def train(
 
 
 if __name__ == '__main__':
+
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--gnn_hidden_channels', type=int, default=1536)
     parser.add_argument('--num_gnn_layers', type=int, default=4)
@@ -267,8 +304,12 @@ if __name__ == '__main__':
     parser.add_argument('--algo_config_version', type=int, required=True)
     parser.add_argument('--g_retriever_config_version', type=int, required=True)
     parser.add_argument('--freeze_llm', type=bool, default=False)
+    parser.add_argument('--device', type=str, required=True)
     args = parser.parse_args()
     load_dotenv('db.env', override=True)
+
+
+    torch.set_default_device(args.device)
 
     start_time = time.time()
     train(
@@ -283,8 +324,8 @@ if __name__ == '__main__':
         algo_config_version=args.algo_config_version,
         g_retriever_config_version=args.g_retriever_config_version,
         checkpointing=args.checkpointing,
-        sys_prompt=args.sys_prompt,
-        num_gpus=args.num_gpus
+        sys_prompt=None,
+        num_gpus=None
     )
     print(f"Total Time: {time.time() - start_time:2f}s")
 
