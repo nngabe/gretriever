@@ -12,7 +12,10 @@ from torch import Tensor
 from torch.nn.utils import clip_grad_norm_
 from torch_geometric import seed_everything
 from torch_geometric.nn.models import GAT
-from torch_geometric.llm import GRetriever,LLM
+from LLM import LLM
+from GRetriever import GRetriever
+from peft import LoraConfig
+from transformers import BitsAndBytesConfig
 from tqdm import tqdm
 
 from compute_metrics import compute_metrics
@@ -65,6 +68,10 @@ def train(
     retrieval_config_version,
     algo_config_version,
     g_retriever_config_version,
+    use_lora,
+    use_quantization,
+    lora_config,
+    quantization_config,
     checkpointing=False,
     sys_prompt=None,
     num_gpus=None
@@ -139,39 +146,33 @@ def train(
 
     gnn = gnn.to(torch.get_default_device().type)
 
-    if llama_version == 'tiny_llama':
-        llm = LLM(
-            model_name='TinyLlama/TinyLlama-1.1B-Chat-v0.1',
-            num_params=1.1,
-        )
-    elif llama_version == 'llama2-7b':
-        llm = LLM(
-            model_name='meta-llama/Llama-2-7b-chat-hf',
-        )
-    elif llama_version == 'llama3.1-8b':
+    if not use_quantization:
+        quantization_config=None
+    print(f'use_quantization={use_quantization}, {quantization_config}')
+    if llama_version == 'llama3.1-8b':
         llm = LLM(
             model_name='meta-llama/Llama-3.1-8B-Instruct',
-            num_params=8.0,
+            quantization_config=quantization_config,
         )
     elif llama_version == 'llama3.2-1b':
         llm = LLM(
             model_name='meta-llama/Llama-3.2-1B-Instruct',
-            num_params=1.0,
+            quantization_config=quantization_config,
         )
     elif llama_version == 'llama3.2-1b-int4':
         llm = LLM(
             model_name='meta-llama/Llama-3.2-3B-Instruct-QLORA_INT4_EO8',
-            num_params=1.0,
+            quantization_config=quantization_config,
         )
     elif llama_version == 'llama3.2-3b':
         llm = LLM(
             model_name='meta-llama/Llama-3.2-3B-Instruct',
-            num_params=1.0,
+            quantization_config=quantization_config,
         )
     elif llama_version == 'llama3.2-3b-int4':
         llm = LLM(
             model_name='meta-llama/Llama-3.2-3B-Instruct-QLORA_INT4_EO8',
-            num_params=1.0,
+            quantization_config=quantization_config,
         )
     
     llm.device = torch.get_default_device()
@@ -187,10 +188,7 @@ def train(
     if model_save_name == f'llm-{llama_version}':
         model = llm
     else:
-        if llama_version == 'tiny_llama':
-            model = GRetriever(llm=llm, gnn=gnn, mlp_out_channels=2048)
-        else:
-            model = GRetriever(llm=llm, gnn=gnn)
+        model = GRetriever(llm=llm, gnn=gnn, use_lora=use_lora, lora_config=lora_config)
 
     print(f"Model device is: {llm.device}")
 
@@ -304,12 +302,29 @@ if __name__ == '__main__':
     parser.add_argument('--algo_config_version', type=int, required=True)
     parser.add_argument('--g_retriever_config_version', type=int, required=True)
     parser.add_argument('--freeze_llm', type=bool, default=False)
+    parser.add_argument('--use_lora', type=bool, default=False)
+    parser.add_argument('--use_quantization', type=bool, default=False)
     parser.add_argument('--device', type=str, required=True)
     args = parser.parse_args()
     load_dotenv('db.env', override=True)
 
-
     torch.set_default_device(args.device)
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
 
     start_time = time.time()
     train(
@@ -323,6 +338,10 @@ if __name__ == '__main__':
         retrieval_config_version=args.retrieval_config_version,
         algo_config_version=args.algo_config_version,
         g_retriever_config_version=args.g_retriever_config_version,
+        use_lora=args.use_lora,
+        use_quantization=args.use_quantization,
+        lora_config=lora_config,
+        quantization_config=quantization_config,
         checkpointing=args.checkpointing,
         sys_prompt=None,
         num_gpus=None
