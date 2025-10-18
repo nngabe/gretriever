@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
-from compute_metrics import compute_intermediate_metrics
+from .compute_metrics import compute_intermediate_metrics
 
 
 def get_nodes_by_vector_search(query_embedding: np.ndarray, k_nodes: int, driver: Driver) -> list[int]:
