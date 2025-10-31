@@ -5,7 +5,11 @@ from torch import Tensor
 
 from torch_geometric.llm.models.llm import LLM, MAX_NEW_TOKENS
 from torch_geometric.utils import scatter
-
+#from scatter import scatter
+from torch_geometric.nn.models import MLP
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+            
+from MPNN import Proj 
 
 class GRetriever(torch.nn.Module):
     r"""The G-Retriever model from the `"G-Retriever: Retrieval-Augmented
@@ -45,51 +49,34 @@ class GRetriever(torch.nn.Module):
         gnn: torch.nn.Module = None,
         use_lora: bool = False,
         lora_config = None,
-        mlp_out_tokens: int = 1,
+        gnn_out_tokens: int = 10,
+        aggr: list = ['sum','max','mean'],
     ) -> None:
         super().__init__()
 
         self.llm = llm
         self.gnn = gnn.to(self.llm.device) if gnn is not None else None
-
+        self.aggr = aggr
+        self.num_aggr = len(aggr)
         self.word_embedding = self.llm.word_embedding
         self.llm_generator = self.llm.llm
         if use_lora:
-            from peft import (
-                LoraConfig,
-                get_peft_model,
-                prepare_model_for_kbit_training,
-            )
             self.llm_generator = prepare_model_for_kbit_training(
                 self.llm_generator)
-            lora_r: int = 8
-            lora_alpha: int = 16
-            lora_dropout: float = 0.05
-            lora_target_modules = ['q_proj', 'v_proj']
-            if lora_config == None:
-                config = LoraConfig(
-                    r=lora_r,
-                    lora_alpha=lora_alpha,
-                    target_modules=lora_target_modules,
-                    lora_dropout=lora_dropout,
-                    bias='none',
-                    task_type='CAUSAL_LM',
-                )
-            else:
-                config = lora_config
-                self.llm_generator = get_peft_model(self.llm_generator, config)
-            print(f'lora_config: {config}')
+            config = lora_config
+            self.llm_generator = get_peft_model(self.llm_generator, config)
 
         if self.gnn is not None:
             mlp_out_channels = llm.word_embedding.embedding_dim
-            mlp_hidden_channels = self.gnn.out_channels
-            self.projector = torch.nn.Sequential(
-                torch.nn.Linear(mlp_hidden_channels, mlp_hidden_channels),
-                torch.nn.Sigmoid(),
-                torch.nn.Linear(mlp_hidden_channels,
-                                mlp_out_channels * mlp_out_tokens),
-                torch.nn.Unflatten(-1, (mlp_out_tokens, mlp_out_channels)),
-            ).to(self.llm.device)
+            mlp_hidden_channels = self.gnn.out_channels * self.num_aggr
+            self.projector = Proj(mlp_hidden_channels, mlp_hidden_channels, mlp_out_channels, gnn_out_tokens, dropout=0.1).to(self.llm.device)
+            #self.projector = torch.nn.Sequential(
+            #    torch.nn.Linear( mlp_hidden_channels, mlp_hidden_channels),
+            #    torch.nn.Sigmoid(),
+            #    torch.nn.Linear(mlp_hidden_channels,
+            #                    mlp_out_channels * gnn_out_tokens),
+            #    torch.nn.Unflatten(-1, (gnn_out_tokens, mlp_out_channels)),
+            #).to(self.llm.device)
 
         self.seq_length_stats = []
 
@@ -116,7 +103,11 @@ class GRetriever(torch.nn.Module):
             model_specific_kwargs['edge_attr'] = edge_attr
 
         out = self.gnn(x, edge_index, **model_specific_kwargs)
-        return scatter(out, batch, dim=0, reduce='mean')
+        aggs = []
+        for aggr in self.aggr:
+            aggs.append(scatter(out, batch, dim=0, reduce=aggr))
+        
+        return torch.cat(aggs, dim=1) 
 
     def forward(
         self,
